@@ -614,6 +614,32 @@ static int install_task(void)
                "  \"%s\" --install\n", exe);
         return 1;
     }
+    /* A background scheduled task has no UI, so Windows cannot show the
+     * "allow this app through the firewall?" prompt -- it just drops inbound
+     * packets silently. Nothing reaches the receiver and there is no error
+     * anywhere to explain it. Add the rule here, where we are already
+     * elevated. Scoped to this executable, these two ports, private networks
+     * only. */
+    {
+        char fw[1024];
+        snprintf(fw, sizeof fw,
+                 "netsh advfirewall firewall delete rule name=\"kmlink\" >nul 2>&1");
+        system(fw);
+        snprintf(fw, sizeof fw,
+                 "netsh advfirewall firewall add rule name=\"kmlink\" dir=in "
+                 "action=allow program=\"%s\" protocol=UDP localport=%d "
+                 "profile=private >nul 2>&1", exe, PORT);
+        if (system(fw) != 0)
+            logmsg("kmlink: could not add the UDP firewall rule\n");
+        snprintf(fw, sizeof fw,
+                 "netsh advfirewall firewall add rule name=\"kmlink\" dir=in "
+                 "action=allow program=\"%s\" protocol=TCP localport=%d "
+                 "profile=private >nul 2>&1", exe, PORT);
+        if (system(fw) != 0)
+            logmsg("kmlink: could not add the TCP firewall rule\n");
+        logmsg("kmlink: firewall rule added for %s (udp/tcp %d, private)\n", exe, PORT);
+    }
+
     logmsg("kmlink: installed. It will start at every logon, elevated.\n");
     if (run_schtasks("/run /tn \"" TASK_NAME "\"") != 0) {
         logmsg("kmlink: the task was created but would not start now.\n"
@@ -631,7 +657,8 @@ static int uninstall_task(void)
         logmsg("kmlink: no scheduled task to remove (or not elevated)\n");
         return 1;
     }
-    logmsg("kmlink: autostart removed\n");
+    system("netsh advfirewall firewall delete rule name=\"kmlink\" >nul 2>&1");
+    logmsg("kmlink: autostart and firewall rule removed\n");
     return 0;
 }
 

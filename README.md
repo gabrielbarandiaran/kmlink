@@ -43,14 +43,34 @@ too, the problem was never bandwidth.
 
 ```sh
 ./build-mac.sh
-./kmlink --genkey
+cp -R kmlink.app /Applications/
+/Applications/kmlink.app/Contents/MacOS/kmlink --genkey
+/Applications/kmlink.app/Contents/MacOS/kmlink --set-host 192.168.1.50
 ```
 
-`--genkey` prints a 64-character key and saves it to
-`~/Library/Application Support/kmlink/key.txt` (mode 0600).
+`--genkey` prints a 64-character key and saves it (mode 0600). You need it in
+step 2. `--set-host` is the PC's address, remembered so the app can be launched
+with no arguments.
 
-Grant Accessibility: **System Settings → Privacy & Security → Accessibility**,
-add the `kmlink` binary. Without it macOS won't let anything read the keyboard.
+Then **open the app once**:
+
+```sh
+open /Applications/kmlink.app
+```
+
+It asks for Accessibility permission and registers itself in **System Settings
+→ Privacy & Security → Accessibility**. Enable it there, then open it again.
+
+> **Why an .app and not just a binary.** macOS attaches an Accessibility grant
+> to an *application identity*. A loose executable has none, so the permission
+> lands on your terminal instead — or cannot be added at all, because the "+"
+> button will not usefully take a bare binary. The app also has to *ask*:
+> `AXIsProcessTrusted()` only queries and never prompts, so an app that only
+> queries never appears in the list to be enabled.
+>
+> The bundle is signed with a real certificate rather than ad-hoc, because an
+> ad-hoc signature changes on every rebuild and macOS then treats each build as
+> a different app and drops the grant.
 
 ### 2. Windows
 
@@ -67,7 +87,7 @@ Run it. Allow the firewall prompt.
 On the Mac:
 
 ```sh
-./kmlink 192.168.1.50      # the PC's address
+open /Applications/kmlink.app
 ```
 
 Press **Cmd+Ctrl+→**. The PC now has your keyboard and mouse. **Cmd+Ctrl+←**

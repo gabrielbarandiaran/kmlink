@@ -19,6 +19,7 @@ let PORT: UInt16 = 24810
 let CONFIG_DIR = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/kmlink")
 let KEY_FILE = CONFIG_DIR.appendingPathComponent("key.txt")
+let HOST_FILE = CONFIG_DIR.appendingPathComponent("host.txt")
 
 enum PacketType: UInt8 {
     case move = 1, button = 2, wheel = 3, key = 4, enter = 5, leave = 6, ping = 7
@@ -366,22 +367,47 @@ if args.contains("--genkey") {
     exit(0)
 }
 
-guard args.count >= 2, !args[1].hasPrefix("--") else {
+if args.count >= 3, args[1] == "--set-host" {
+    try? FileManager.default.createDirectory(at: CONFIG_DIR, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+    try? args[2].write(to: HOST_FILE, atomically: true, encoding: .utf8)
+    print("peer set to \(args[2])")
+    exit(0)
+}
+
+// Launched from an .app there are no arguments, so fall back to the remembered
+// peer. The bundle is what macOS attaches the Accessibility grant to.
+let savedHost = (try? String(contentsOf: HOST_FILE, encoding: .utf8))?
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+let host: String
+if args.count >= 2, !args[1].hasPrefix("--") {
+    host = args[1]
+} else if let h = savedHost, !h.isEmpty {
+    host = h
+} else {
     print("usage: kmlink <windows-ip>")
+    print("       kmlink --set-host <windows-ip>   remember it, then run with no arguments")
     print("       kmlink --genkey")
     exit(1)
 }
-let host = args[1]
 
 guard let keyData = loadKey() else {
     FileHandle.standardError.write("No key at \(KEY_FILE.path)\nRun: kmlink --genkey\n".data(using: .utf8)!)
     exit(1)
 }
 
-guard AXIsProcessTrusted() else {
+// AXIsProcessTrusted() only asks whether we are trusted; it never prompts, so
+// the app never shows up in the Accessibility list for you to enable. Passing
+// kAXTrustedCheckOptionPrompt makes macOS show the request and register us,
+// which is the only way the entry appears at all.
+if !AXIsProcessTrusted() {
+    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    _ = AXIsProcessTrustedWithOptions(opts)
     FileHandle.standardError.write("""
-        Accessibility permission is required to read the keyboard.
-        System Settings -> Privacy & Security -> Accessibility, add this binary.
+        Asked macOS for Accessibility permission.
+
+        Approve it in the dialog, or in System Settings -> Privacy & Security
+        -> Accessibility, where kmlink is now listed. Then run this again.
 
         """.data(using: .utf8)!)
     exit(1)

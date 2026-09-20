@@ -217,20 +217,6 @@ static int key_is_extended(BYTE vk)
     }
 }
 
-static void send_key(rxstate *st, BYTE vk, int down)
-{
-    INPUT in;
-
-    memset(&in, 0, sizeof in);
-    in.type       = INPUT_KEYBOARD;
-    in.ki.wVk     = vk;
-    in.ki.wScan   = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    in.ki.dwFlags = (DWORD)((down ? 0 : KEYEVENTF_KEYUP) |
-                            (key_is_extended(vk) ? KEYEVENTF_EXTENDEDKEY : 0));
-    injected(SendInput(1, &in, sizeof in));
-    st->key_down[vk] = (unsigned char)(down ? 1 : 0);
-}
-
 /* SendInput fails, returning 0, when UIPI blocks us: the foreground window
  * belongs to a process at a higher integrity level (an elevated game, its
  * anti-cheat, or a UAC prompt) and a non-elevated sender may not inject into
@@ -255,6 +241,20 @@ static void injected(UINT sent)
     last_warn = GetTickCount64();
     printf("SendInput refused (%u so far). The focused window is likely "
            "elevated -- run kmlink as administrator.\n", failures);
+}
+
+static void send_key(rxstate *st, BYTE vk, int down)
+{
+    INPUT in;
+
+    memset(&in, 0, sizeof in);
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wVk     = vk;
+    in.ki.wScan   = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    in.ki.dwFlags = (DWORD)((down ? 0 : KEYEVENTF_KEYUP) |
+                            (key_is_extended(vk) ? KEYEVENTF_EXTENDEDKEY : 0));
+    injected(SendInput(1, &in, sizeof in));
+    st->key_down[vk] = (unsigned char)(down ? 1 : 0);
 }
 
 static void send_mouse(DWORD flags, LONG dx, LONG dy, DWORD data)

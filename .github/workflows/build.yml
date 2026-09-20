@@ -67,4 +67,8 @@ jobs:
       - name: Build
         run: ./build-mac.sh
       - name: Check it runs
-        run: ./kmlink 2>&1 | grep -q "usage:" && echo "ok"
+        # build-mac.sh installs to /Applications and removes the local copy on
+        # purpose: two bundles sharing one identifier make macOS evaluate the
+        # Accessibility grant against the wrong one.
+        run: |
+          /Applications/kmlink.app/Contents/MacOS/kmlink 2>&1 | grep -q "usage:" && echo "ok"

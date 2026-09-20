@@ -599,71 +599,89 @@ static int run_schtasks(const char *args)
 
 static int install_task(void)
 {
-    char exe[MAX_PATH], args[1024];
+    char  exe[MAX_PATH], xml[MAX_PATH], cmd[1024], fw[1024];
+    FILE *f;
 
     if (!GetModuleFileNameA(NULL, exe, sizeof exe)) {
         logmsg("kmlink: cannot determine my own path\n");
         return 1;
     }
-    /* One level of quoting only. Escaping the inner quotes as well registers
-     * the action as \"C:\path\exe\" -- literal backslash-quotes -- and the task
-     * then fails to find the file. schtasks does not validate the path when
-     * creating, and /run only reports that it attempted, so both report
-     * success while nothing ever starts. */
-    snprintf(args, sizeof args,
-             "/create /tn \"%s\" /tr \"%s\" /sc onlogon /rl highest /f",
-             TASK_NAME, exe);
-    if (run_schtasks(args) != 0) {
+
+    /* Defined as XML rather than with schtasks switches, because the settings
+     * that matter here are not exposed as switches and their defaults are
+     * wrong for a handheld:
+     *
+     *   DisallowStartIfOnBatteries  defaults true  -> never starts on battery
+     *   StopIfGoingOnBatteries      defaults true  -> dies when unplugged
+     *   ExecutionTimeLimit          defaults 72h   -> killed after three days
+     *
+     * On a device that is usually on battery, the first two mean the task is
+     * created, reports success, and never runs. */
+    snprintf(xml, sizeof xml, "%s\\kmlink-task.xml", getenv("TEMP"));
+    f = fopen(xml, "w, ccs=UTF-16LE");     /* schtasks /xml wants UTF-16 */
+    if (!f) { logmsg("kmlink: cannot write %s\n", xml); return 1; }
+
+    fprintf(f,
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+        "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+        "  <RegistrationInfo><Description>kmlink receiver</Description></RegistrationInfo>\n"
+        "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n"
+        "  <Principals><Principal id=\"Author\">\n"
+        "    <LogonType>InteractiveToken</LogonType>\n"
+        "    <RunLevel>HighestAvailable</RunLevel>\n"
+        "  </Principal></Principals>\n"
+        "  <Settings>\n"
+        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+        "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+        "    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd></IdleSettings>\n"
+        "    <Enabled>true</Enabled>\n"
+        "  </Settings>\n"
+        "  <Actions Context=\"Author\"><Exec><Command>%s</Command></Exec></Actions>\n"
+        "</Task>\n", exe);
+    fclose(f);
+
+    snprintf(cmd, sizeof cmd, "/create /tn \"%s\" /xml \"%s\" /f", TASK_NAME, xml);
+    if (run_schtasks(cmd) != 0) {
         logmsg("kmlink: could not create the scheduled task.\n"
-               "Run this from an administrator prompt:\n"
-               "  \"%s\" --install\n", exe);
+               "Run this from an administrator prompt:\n  \"%s\" --install\n", exe);
         return 1;
     }
-    /* A background scheduled task has no UI, so Windows cannot show the
-     * "allow this app through the firewall?" prompt -- it just drops inbound
-     * packets silently. Nothing reaches the receiver and there is no error
-     * anywhere to explain it. Add the rule here, where we are already
-     * elevated. Scoped to this executable, these two ports, private networks
-     * only. */
-    {
-        char fw[1024];
-        snprintf(fw, sizeof fw,
-                 "netsh advfirewall firewall delete rule name=\"kmlink\" >nul 2>&1");
-        system(fw);
-        snprintf(fw, sizeof fw,
-                 "netsh advfirewall firewall add rule name=\"kmlink\" dir=in "
-                 "action=allow program=\"%s\" protocol=UDP localport=%d "
-                 "profile=private >nul 2>&1", exe, PORT);
-        if (system(fw) != 0)
-            logmsg("kmlink: could not add the UDP firewall rule\n");
-        snprintf(fw, sizeof fw,
-                 "netsh advfirewall firewall add rule name=\"kmlink\" dir=in "
-                 "action=allow program=\"%s\" protocol=TCP localport=%d "
-                 "profile=private >nul 2>&1", exe, PORT);
-        if (system(fw) != 0)
-            logmsg("kmlink: could not add the TCP firewall rule\n");
-        logmsg("kmlink: firewall rule added for %s (udp/tcp %d, private)\n", exe, PORT);
+    DeleteFileA(xml);
+
+    /* A background task has no UI, so Windows cannot show the firewall prompt
+     * and silently drops inbound packets instead. */
+    system("netsh advfirewall firewall delete rule name=\"kmlink\" >nul 2>&1");
+    snprintf(fw, sizeof fw,
+             "netsh advfirewall firewall add rule name=\"kmlink\" dir=in action=allow "
+             "program=\"%s\" protocol=UDP localport=%d profile=private >nul 2>&1", exe, PORT);
+    system(fw);
+    snprintf(fw, sizeof fw,
+             "netsh advfirewall firewall add rule name=\"kmlink\" dir=in action=allow "
+             "program=\"%s\" protocol=TCP localport=%d profile=private >nul 2>&1", exe, PORT);
+    system(fw);
+
+    logmsg("kmlink: installed (starts at logon, elevated, runs on battery)\n");
+
+    if (run_schtasks("/run /tn \"" TASK_NAME "\"") != 0) {
+        logmsg("kmlink: created but would not start. Sign out and back in.\n");
+        return 1;
     }
 
-    logmsg("kmlink: installed. It will start at every logon, elevated.\n");
-    if (run_schtasks("/run /tn \"" TASK_NAME "\"") != 0) {
-        logmsg("kmlink: the task was created but would not start now.\n"
-               "Sign out and back in, or run: schtasks /run /tn %s\n", TASK_NAME);
-        return 1;
-    }
-    /* Confirm something is actually listening. The single-instance mutex is
-     * the cheapest proof: if the task started us, it holds it. */
+    /* Prove it. The single-instance mutex exists only if we are really up. */
     Sleep(1500);
     {
         HANDLE m = OpenMutexA(SYNCHRONIZE, FALSE, "kmlink_single_instance");
         if (m) {
             CloseHandle(m);
-            logmsg("kmlink: running. Check %%LOCALAPPDATA%%\\kmlink\\kmlink.log\n");
+            logmsg("kmlink: running.\n");
             return 0;
         }
     }
     logmsg("kmlink: the task was created but nothing is running.\n"
-           "Check what it registered:  schtasks /query /tn %s /v /fo list\n", TASK_NAME);
+           "  schtasks /query /tn %s /v /fo list\n", TASK_NAME);
     return 1;
 }
 

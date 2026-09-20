@@ -45,11 +45,35 @@ pattern matters: **every message that reported success was lying.**
 9. `schtasks /create` defaults `DisallowStartIfOnBatteries` and
    `StopIfGoingOnBatteries` to true, and caps runtime at 72h. On a handheld
    that means it never starts. Fixed with an XML task definition.
+10. That XML task definition had never run. `fopen(path, "w, ccs=UTF-16LE")`
+    puts the stream into the CRT's Unicode translation mode, where the narrow
+    `printf` family is an invalid parameter: nothing is written while `fopen`
+    and `fclose` both report success. `schtasks` read the resulting two-byte
+    BOM and said *"The task XML is malformed"* — naming the XML, which was
+    innocent. Fixed by converting with `MultiByteToWideChar` and writing bytes.
+11. The fix for the *reporting* of 10 broke it again. schtasks' output was
+    redirected into `kmlink.log`, which this process holds open, so `cmd.exe`
+    could not open it for append and the command never ran at all — reported
+    identically to the command running and failing. Now via a scratch file.
+12. Not a code fault, but the same shape and it cost a round trip: the install
+    instructions used a PowerShell backtick line continuation, which does not
+    survive a multi-line paste into the console. `Invoke-WebRequest` ran with
+    no URL, the download silently did not happen, and the log being read was
+    the previous run's. **Hand over one-line commands.**
+
+Installing successfully on 2026-09-20 took 10, 11 and 12 in sequence, each
+found only after the last was cleared — the same pattern as 1 through 9, and
+the same cause: the component reporting the error was never the one at fault.
 
 ## Open — the current problem
 
-**It still stops working unpredictably.** Still not diagnosed — the log from a
-real failure has not been read yet. Start there:
+**It still stops working unpredictably.** Still not diagnosed. As of
+2026-09-20 the receiver installs and runs correctly for the first time, on a
+build that has all of the above — so nothing before now tested whether the
+unpredictable stopping survives the fixes. It may already be gone. Watch it
+over a few days of real use, unplugged, before concluding anything.
+
+When it next stops, the log from that failure is the thing to read:
 
 ```powershell
 type "$env:LOCALAPPDATA\kmlink\kmlink.log"

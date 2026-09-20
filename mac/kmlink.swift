@@ -225,6 +225,49 @@ final class ClipboardWatcher {
     }
 }
 
+// MARK: - Menu bar
+
+/// Shows at a glance whether input is going to the Mac or the PC, and gives a
+/// way to quit. Without it a forgotten instance sitting in "PC" mode swallows
+/// every event and looks like the Mac has frozen.
+final class StatusBar {
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let toggleItem = NSMenuItem(title: "", action: #selector(StatusBar.toggle), keyEquivalent: "")
+    var onToggle: (() -> Void)?
+
+    init(host: String) {
+        let menu = NSMenu()
+        stateItem.isEnabled = false
+        menu.addItem(stateItem)
+        menu.addItem(NSMenuItem(title: "Peer: \(host)", action: nil, keyEquivalent: ""))
+        menu.addItem(.separator())
+        toggleItem.target = self
+        menu.addItem(toggleItem)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit kmlink", action: #selector(NSApplication.terminate(_:)),
+                                keyEquivalent: "q"))
+        item.menu = menu
+        set(active: false)
+    }
+
+    @objc private func toggle() { onToggle?() }
+
+    func set(active: Bool) {
+        let name = active ? "display" : "laptopcomputer"
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            button.image?.isTemplate = true
+            // Fall back to text on anything without the symbol.
+            if button.image == nil { button.title = active ? "PC" : "Mac" }
+        }
+        stateItem.title = active ? "Input going to the PC" : "Input staying on this Mac"
+        toggleItem.title = active ? "Take back  (Cmd+Ctrl+Left)" : "Send to PC  (Cmd+Ctrl+Right)"
+    }
+}
+
+var statusBar: StatusBar?
+
 // MARK: - State
 
 final class Controller {
@@ -237,6 +280,7 @@ final class Controller {
     func enter() {
         guard !active else { return }
         active = true
+        statusBar?.set(active: true)
         sender.send(payload(.enter), copies: 3)
         FileHandle.standardError.write("-> windows\n".data(using: .utf8)!)
     }
@@ -251,6 +295,7 @@ final class Controller {
         }
         heldKeys.removeAll()
         active = false
+        statusBar?.set(active: false)
         sender.send(payload(.leave), copies: 3)
         FileHandle.standardError.write("-> mac\n".data(using: .utf8)!)
     }
@@ -403,16 +448,19 @@ guard let keyData = loadKey() else {
 // withheld entirely. The symptom is "the mouse works, the keyboard does not,
 // and the Mac cursor moves too" -- which looks like a bug in the tap rather
 // than a missing permission.
-if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+let hidAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
+if hidAccess != kIOHIDAccessTypeGranted {
     _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    // Warn but carry on. Without this the mouse still works; only the keyboard
+    // is withheld. Exiting here would take away the half that does work.
     FileHandle.standardError.write("""
-        Input Monitoring permission is required to read the keyboard.
+        WARNING: Input Monitoring is not granted, so the keyboard will not be
+        captured and the local cursor will not freeze. The mouse still works.
 
-        Approve the dialog, or enable kmlink in System Settings -> Privacy &
-        Security -> Input Monitoring. Then run this again.
+        Enable kmlink in System Settings -> Privacy & Security -> Input
+        Monitoring, then quit and reopen this app.
 
         """.data(using: .utf8)!)
-    exit(1)
 }
 
 // AXIsProcessTrusted() only asks whether we are trusted; it never prompts, so
@@ -474,4 +522,13 @@ Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
 print("kmlink -> \(host)")
 print("Cmd+Ctrl+Right  send input to the PC")
 print("Cmd+Ctrl+Left   take it back")
-CFRunLoopRun()
+
+// A status item needs a running NSApplication. .accessory keeps it out of the
+// Dock and the app switcher; the event tap source is on this run loop, which
+// NSApp.run() pumps just as CFRunLoopRun() did.
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let bar = StatusBar(host: host)
+bar.onToggle = { controller.active ? controller.leave() : controller.enter() }
+statusBar = bar
+app.run()

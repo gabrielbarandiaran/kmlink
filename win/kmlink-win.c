@@ -605,8 +605,13 @@ static int install_task(void)
         logmsg("kmlink: cannot determine my own path\n");
         return 1;
     }
+    /* One level of quoting only. Escaping the inner quotes as well registers
+     * the action as \"C:\path\exe\" -- literal backslash-quotes -- and the task
+     * then fails to find the file. schtasks does not validate the path when
+     * creating, and /run only reports that it attempted, so both report
+     * success while nothing ever starts. */
     snprintf(args, sizeof args,
-             "/create /tn \"%s\" /tr \"\\\"%s\\\"\" /sc onlogon /rl highest /f",
+             "/create /tn \"%s\" /tr \"%s\" /sc onlogon /rl highest /f",
              TASK_NAME, exe);
     if (run_schtasks(args) != 0) {
         logmsg("kmlink: could not create the scheduled task.\n"
@@ -646,8 +651,20 @@ static int install_task(void)
                "Sign out and back in, or run: schtasks /run /tn %s\n", TASK_NAME);
         return 1;
     }
-    logmsg("kmlink: started. Check %%LOCALAPPDATA%%\\kmlink\\kmlink.log\n");
-    return 0;
+    /* Confirm something is actually listening. The single-instance mutex is
+     * the cheapest proof: if the task started us, it holds it. */
+    Sleep(1500);
+    {
+        HANDLE m = OpenMutexA(SYNCHRONIZE, FALSE, "kmlink_single_instance");
+        if (m) {
+            CloseHandle(m);
+            logmsg("kmlink: running. Check %%LOCALAPPDATA%%\\kmlink\\kmlink.log\n");
+            return 0;
+        }
+    }
+    logmsg("kmlink: the task was created but nothing is running.\n"
+           "Check what it registered:  schtasks /query /tn %s /v /fo list\n", TASK_NAME);
+    return 1;
 }
 
 static int uninstall_task(void)

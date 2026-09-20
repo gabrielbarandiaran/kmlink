@@ -243,9 +243,19 @@ static void log_open(void)
 
 static void logmsg(const char *fmt, ...)
 {
-    va_list ap;
+    va_list   ap;
+    SYSTEMTIME t;
+
     if (stdout) { va_start(ap, fmt); vprintf(fmt, ap); va_end(ap); }
-    if (g_log)  { va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap); }
+    if (g_log) {
+        /* Timestamped, because the useful question is almost always "when did
+         * it stop, and what happened just before" -- unplugged, slept, changed
+         * network, logged out. Without times the log cannot answer it. */
+        GetLocalTime(&t);
+        fprintf(g_log, "%02d-%02d %02d:%02d:%02d  ",
+                t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap);
+    }
 }
 
 /* SendInput fails, returning 0, when UIPI blocks us: the foreground window
@@ -707,7 +717,8 @@ int main(int argc, char **argv)
     SOCKET        usock;
     rxstate       st;
     ULONGLONG     last_rx = 0;
-    int           linked = 0, have_peer = 0;
+    int           linked = 0, have_peer = 0, idle_logged = 0;
+    (void)idle_logged;
     uint32_t      peer_ip = 0;
     uint16_t      peer_port = 0;
 
@@ -790,6 +801,7 @@ int main(int argc, char **argv)
             st.have_seq = 0;    /* a gap means a new session; let its seq restart */
             linked = 0;
             logmsg("kmlink: link idle, released everything held\n");
+            idle_logged = 1;
         }
 
         if (n == SOCKET_ERROR) {

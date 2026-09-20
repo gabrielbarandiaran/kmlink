@@ -229,21 +229,19 @@ static int key_is_extended(BYTE vk)
  * diagnosable from the SendInput message -- so write them to a file, and also
  * to the console when there is one (--selftest, --install, run from a prompt). */
 static FILE *g_log;
-static char  g_logpath[MAX_PATH];
 
 static void log_open(void)
 {
+    char path[MAX_PATH];
     const char *base = getenv("LOCALAPPDATA");
 
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         freopen("CONOUT$", "w", stdout);
         setvbuf(stdout, NULL, _IONBF, 0);
     }
-    if (base && snprintf(g_logpath, sizeof g_logpath,
-                         "%s\\kmlink\\kmlink.log", base) > 0) {
-        g_log = fopen(g_logpath, "a");
+    if (base && snprintf(path, sizeof path, "%s\\kmlink\\kmlink.log", base) > 0) {
+        g_log = fopen(path, "a");
         if (g_log) setvbuf(g_log, NULL, _IONBF, 0);
-        else       g_logpath[0] = '\0';
     }
 }
 
@@ -611,18 +609,48 @@ static int selftest(void)
  * later, and the receiver itself runs with no console at all, so every error
  * schtasks has ever printed here has been lost.  "The task XML is malformed"
  * existed for days before anyone read it. */
-static int run_schtasks(const char *args)
+static int system_schtasks_plain(const char *args)
 {
     char cmd[1024];
-    int  rc;
+    snprintf(cmd, sizeof cmd, "schtasks %s", args);
+    return system(cmd);
+}
 
-    if (g_logpath[0])
-        snprintf(cmd, sizeof cmd, "schtasks %s >>\"%s\" 2>&1", args, g_logpath);
-    else
-        snprintf(cmd, sizeof cmd, "schtasks %s", args);
+static int run_schtasks(const char *args)
+{
+    const char *tmp = getenv("TEMP");
+    char  cmd[1024], out[MAX_PATH], line[512];
+    int   rc;
+    FILE *f;
+
+    /* Via a scratch file the child owns, not straight into kmlink.log: this
+     * process holds the log open, cmd.exe cannot open it for append while we
+     * do, and a failed redirect means the command never runs at all.  That
+     * turned "schtasks failed" into "schtasks was never executed", reported
+     * identically. */
+    if (!tmp) {
+        rc = system_schtasks_plain(args);
+        return rc;
+    }
+    snprintf(out, sizeof out, "%s\\kmlink-schtasks.txt", tmp);
+    snprintf(cmd, sizeof cmd, "schtasks %s >\"%s\" 2>&1", args, out);
 
     rc = system(cmd);
     logmsg("kmlink: schtasks %s -> %d\n", args, rc);
+
+    /* Fold what it said into the log.  Everything schtasks has ever printed
+     * here went to a console that --install is run from and closed moments
+     * later, or to no console at all under the scheduler. */
+    f = fopen(out, "r");
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            size_t k = strlen(line);
+            while (k && (line[k - 1] == '\n' || line[k - 1] == '\r')) line[--k] = '\0';
+            if (k) logmsg("  %s\n", line);
+        }
+        fclose(f);
+        DeleteFileA(out);
+    }
     return rc;
 }
 

@@ -36,6 +36,10 @@
 #define CLIP_MAX        (1024 * 1024)
 #define IDLE_MS         3000
 #define RECV_TIMEOUT_MS 500
+/* A loop pass is capped at RECV_TIMEOUT_MS, so a wall-clock gap far larger
+ * than that means we were not running.  Ten times the timeout is well clear
+ * of ordinary scheduling noise. */
+#define SUSPEND_GAP_MS  (RECV_TIMEOUT_MS * 10)
 #define MOD_COUNT       4                        /* shift, ctrl, alt, gui */
 
 #define T_MOVE 1
@@ -626,7 +630,15 @@ static int install_task(void)
      *   ExecutionTimeLimit          defaults 72h   -> killed after three days
      *
      * On a device that is usually on battery, the first two mean the task is
-     * created, reports success, and never runs. */
+     * created, reports success, and never runs.
+     *
+     * The two triggers and RestartOnFailure are about the same problem from
+     * the other end.  A LogonTrigger alone fires once a day: if the receiver
+     * ever stops, nothing brings it back until the next sign-in, which is
+     * indistinguishable from the receiver never having worked.  SessionUnlock
+     * fires on every resume from standby -- the common case on a handheld --
+     * and MultipleInstancesPolicy plus the single-instance mutex make a
+     * redundant start harmless. */
     snprintf(xml, sizeof xml, "%s\\kmlink-task.xml", getenv("TEMP"));
     f = fopen(xml, "w, ccs=UTF-16LE");     /* schtasks /xml wants UTF-16 */
     if (!f) { logmsg("kmlink: cannot write %s\n", xml); return 1; }
@@ -635,7 +647,12 @@ static int install_task(void)
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
         "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
         "  <RegistrationInfo><Description>kmlink receiver</Description></RegistrationInfo>\n"
-        "  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n"
+        "  <Triggers>\n"
+        "    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>\n"
+        "    <SessionStateChangeTrigger>\n"
+        "      <Enabled>true</Enabled><StateChange>SessionUnlock</StateChange>\n"
+        "    </SessionStateChangeTrigger>\n"
+        "  </Triggers>\n"
         "  <Principals><Principal id=\"Author\">\n"
         "    <LogonType>InteractiveToken</LogonType>\n"
         "    <RunLevel>HighestAvailable</RunLevel>\n"
@@ -647,6 +664,7 @@ static int install_task(void)
         "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
         "    <StartWhenAvailable>true</StartWhenAvailable>\n"
         "    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd></IdleSettings>\n"
+        "    <RestartOnFailure><Interval>PT1M</Interval><Count>99</Count></RestartOnFailure>\n"
         "    <Enabled>true</Enabled>\n"
         "  </Settings>\n"
         "  <Actions Context=\"Author\"><Exec><Command>%s</Command></Exec></Actions>\n"
@@ -673,7 +691,24 @@ static int install_task(void)
              "program=\"%s\" protocol=TCP localport=%d profile=private >nul 2>&1", exe, PORT);
     system(fw);
 
-    logmsg("kmlink: installed (starts at logon, elevated, runs on battery)\n");
+    /* The other half of the battery problem, and the half the task settings
+     * cannot reach.  On battery Windows drops the Wi-Fi radio into its
+     * lowest-power mode, which parks the receiver between beacons: datagrams
+     * arrive in bursts or not at all, and it looks exactly like the link
+     * having died.  Maximum Performance on both AC and DC costs idle battery
+     * and buys a radio that is actually listening.
+     *
+     * 12bbebe6-... is Power Saving Mode under SUB_WIRELESSADAPTER; 0 is
+     * Maximum Performance.  --uninstall does not put this back, because the
+     * value it replaced is not recorded anywhere; see the README. */
+    system("powercfg /setacvalueindex SCHEME_CURRENT SUB_WIRELESSADAPTER "
+           "12bbebe6-58d6-4636-95bb-3217ef867c1a 0 >nul 2>&1");
+    system("powercfg /setdcvalueindex SCHEME_CURRENT SUB_WIRELESSADAPTER "
+           "12bbebe6-58d6-4636-95bb-3217ef867c1a 0 >nul 2>&1");
+    system("powercfg /setactive SCHEME_CURRENT >nul 2>&1");
+
+    logmsg("kmlink: installed (starts at logon and on unlock, elevated, runs on\n"
+           "        battery, Wi-Fi power saving off, restarts itself if it dies)\n");
 
     if (run_schtasks("/run /tn \"" TASK_NAME "\"") != 0) {
         logmsg("kmlink: created but would not start. Sign out and back in.\n");
@@ -716,7 +751,8 @@ int main(int argc, char **argv)
     WSADATA       wsa;
     SOCKET        usock;
     rxstate       st;
-    ULONGLONG     last_rx = 0;
+    ULONGLONG     last_rx = 0, last_tick = 0, last_power = 0;
+    BYTE          last_ac = 0xFF;
     int           linked = 0, have_peer = 0, idle_logged = 0;
     (void)idle_logged;
     uint32_t      peer_ip = 0;
@@ -786,7 +822,7 @@ int main(int argc, char **argv)
     for (;;) {
         struct sockaddr_in from;
         int                fromlen = sizeof from;
-        int                n;
+        int                n, tries;
         ULONG              plen = 0;
         ULONGLONG          now;
 
@@ -796,6 +832,29 @@ int main(int argc, char **argv)
         /* Checked every pass and not only on a timeout: a flood of packets we
          * go on to reject must not disguise a dead link. */
         now = GetTickCount64();
+
+        /* GetTickCount64 keeps counting while the machine is suspended; this
+         * loop does not, because a pass is capped at the recv timeout.  A much
+         * larger gap therefore means we were not running: standby, sleep, or
+         * the process frozen.  That is the one question an overnight stop
+         * always raises and the log could never answer. */
+        if (last_tick && now - last_tick > SUSPEND_GAP_MS)
+            logmsg("kmlink: %llu s gap -- asleep, or this process was frozen\n",
+                   (unsigned long long)((now - last_tick) / 1000));
+        last_tick = now;
+
+        /* Once a second rather than per datagram: this sits on the input path.
+         * Logged because "it stopped" and "it was unplugged" are the same
+         * event often enough to be worth telling apart without asking. */
+        if (now - last_power >= 1000) {
+            SYSTEM_POWER_STATUS ps;
+            last_power = now;
+            if (GetSystemPowerStatus(&ps) && ps.ACLineStatus != last_ac) {
+                last_ac = ps.ACLineStatus;
+                logmsg("kmlink: running on %s\n", last_ac == 1 ? "AC" : "battery");
+            }
+        }
+
         if (linked && now - last_rx >= IDLE_MS) {
             release_all(&st);
             st.have_seq = 0;    /* a gap means a new session; let its seq restart */
@@ -808,8 +867,30 @@ int main(int argc, char **argv)
             int e = WSAGetLastError();
             if (e == WSAETIMEDOUT || e == WSAEMSGSIZE || e == WSAECONNRESET || e == WSAEINTR)
                 continue;
-            logmsg("kmlink: recvfrom failed (%d)\n", e);
-            return 1;
+            /* Anything else is the adapter going out from under us: the
+             * radio powering down, standby tearing the stack down, a profile
+             * change on resume.  This used to return 1, and with a logon-only
+             * task nothing started it again until the next sign-in -- so a
+             * transient socket error read as "kmlink stopped working today"
+             * with no way back and nothing in the log after it.  Rebuild and
+             * keep trying instead; the log says how long it took. */
+            logmsg("kmlink: recvfrom failed (%d), rebuilding the listener\n", e);
+            release_all(&st);
+            st.have_seq = 0;
+            linked    = 0;
+            have_peer = 0;
+            closesocket(usock);
+            for (tries = 1; ; tries++) {
+                usock = bind_listener(0);
+                if (usock != INVALID_SOCKET) break;
+                if (tries == 1 || tries % 60 == 0)
+                    logmsg("kmlink: port %d still unavailable (attempt %d)\n", PORT, tries);
+                Sleep(1000);
+            }
+            logmsg("kmlink: listening again after %d attempt(s)\n", tries);
+            last_rx = GetTickCount64();
+            last_tick = last_rx;
+            continue;
         }
         if (n < PKT_MIN) continue;
         if (!aes_open(&ukey, dgram, (ULONG)n, plain, (ULONG)sizeof plain, &plen)) continue;

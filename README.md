@@ -82,6 +82,41 @@ Both machines must have identical keys.
 
 Run it. Allow the firewall prompt.
 
+To have it start on its own, from an administrator prompt:
+
+```
+kmlink-win.exe --install
+```
+
+That registers a scheduled task that starts at sign-in and on every unlock,
+runs elevated, is not gated on mains power, and restarts itself if it exits.
+It also adds the firewall rule, because a task started in the background has
+no window and so can never show you the firewall prompt.
+
+#### Power settings it changes
+
+A handheld spends its life on battery, and Windows' battery defaults are all
+wrong for something whose whole job is to be listening. `--install` sets the
+**wireless adapter power saving mode to Maximum Performance** on both AC and
+battery, because the low-power mode parks the radio between beacons and
+datagrams then arrive in bursts or not at all.
+
+`--uninstall` does not undo it — the previous value is not recorded anywhere.
+To put it back to the balanced default:
+
+```
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_WIRELESSADAPTER 12bbebe6-58d6-4636-95bb-3217ef867c1a 2
+powercfg /setactive SCHEME_CURRENT
+```
+
+One power setting is left to you, because it resets the adapter and is
+per-device rather than per-scheme — *Allow the computer to turn off this device
+to save power*, on the Wi-Fi adapter in Device Manager. Or:
+
+```
+powershell -Command "Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Disable-NetAdapterPowerManagement"
+```
+
 ### 3. Go
 
 On the Mac:

@@ -48,28 +48,47 @@ pattern matters: **every message that reported success was lying.**
 
 ## Open — the current problem
 
-**It still stops working unpredictably.** Not yet diagnosed. The log is now
-timestamped, which it was not for any of the above, so the next attempt should
-start there:
+**It still stops working unpredictably.** Still not diagnosed — the log from a
+real failure has not been read yet. Start there:
 
 ```powershell
 type "$env:LOCALAPPDATA\kmlink\kmlink.log"
 ```
 
-The question to answer is **when it stopped and what happened just before** —
-unplugged, slept, changed network, logged out, game launched.
+The question is **when it stopped and what happened just before**. The log can
+now answer that without being asked: it records AC↔battery transitions, and it
+notices its own absence. A loop pass is capped at the 500 ms recv timeout,
+while `GetTickCount64` keeps counting through suspend, so any much larger gap
+prints `N s gap -- asleep, or this process was frozen`. An overnight stop
+should now say whether the machine slept.
 
-Candidates not yet ruled out:
+Also worth reading, and available for failures that have *already* happened:
 
-- Task stopping on sleep/resume (`StartWhenAvailable` may not cover it)
-- The Ally's power management killing the process independently of the task
-- The receiver exiting on a `recvfrom` error path
-- Wi-Fi address changing (the Mac targets a fixed IP in `host.txt`)
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-Power'} -MaxEvents 40 |
+    Format-Table TimeCreated, Id, Message -Auto
+Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 40 |
+    Where-Object { $_.Message -match 'kmlink' } | Format-Table TimeCreated, Id, Message -Auto
+```
 
-**Suggestion for the next session: stop guessing.** Every fix above came from
-reading actual output — `schtasks /query /v`, the empty process list, the
-`Power Management` line. The guesses in between were wrong, twice blaming the
-network when measurement later showed it was fine.
+Candidates, and where each now stands:
+
+| Candidate | Status |
+|---|---|
+| Task gated on mains power | **Ruled out** — XML sets both battery settings false. Verify with `schtasks /query /tn kmlink /xml`. |
+| Nothing restarts it once it stops | **Addressed** — `RestartOnFailure`, plus a `SessionUnlock` trigger so a resume starts it if it died. |
+| Receiver exiting on a `recvfrom` error | **Addressed** — it rebuilds the listener and logs the error code instead of returning 1. |
+| Wi-Fi radio power saving parking the receiver | **Addressed** — `--install` sets the wireless adapter to Maximum Performance on AC and DC. |
+| Wi-Fi address changing (the Mac targets a fixed IP) | **Open.** Nothing done. |
+| The Ally suspending the process itself | **Open**, but now visible: the gap line fires when it happens. |
+
+None of the four addressed rows is a diagnosis. They remove ways for a stop to
+be permanent or invisible; the log from the next failure is what identifies the
+cause.
+
+**Suggestion that still holds: stop guessing.** Every fix in the list above came
+from reading actual output. The guesses in between were wrong, twice blaming
+the network when measurement later showed it was fine.
 
 ## Removed
 
@@ -87,6 +106,9 @@ network when measurement later showed it was fine.
 ## Things deliberately left
 
 - **Clipboard is Mac → PC only.** Reverse direction not implemented.
+- **The clipboard thread never rebinds.** If its listener socket goes bad
+  it spins on `accept` at 10 Hz forever — harmless to input, but it is a
+  battery drain on a handheld and it will never recover on its own.
 - **Scroll direction** may need a sign flip for macOS natural scrolling. Never
   confirmed either way.
 - **Games**: `SendInput` is refused under UIPI when the focused window is

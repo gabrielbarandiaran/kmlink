@@ -229,19 +229,21 @@ static int key_is_extended(BYTE vk)
  * diagnosable from the SendInput message -- so write them to a file, and also
  * to the console when there is one (--selftest, --install, run from a prompt). */
 static FILE *g_log;
+static char  g_logpath[MAX_PATH];
 
 static void log_open(void)
 {
-    char path[MAX_PATH];
     const char *base = getenv("LOCALAPPDATA");
 
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         freopen("CONOUT$", "w", stdout);
         setvbuf(stdout, NULL, _IONBF, 0);
     }
-    if (base && snprintf(path, sizeof path, "%s\\kmlink\\kmlink.log", base) > 0) {
-        g_log = fopen(path, "a");
+    if (base && snprintf(g_logpath, sizeof g_logpath,
+                         "%s\\kmlink\\kmlink.log", base) > 0) {
+        g_log = fopen(g_logpath, "a");
         if (g_log) setvbuf(g_log, NULL, _IONBF, 0);
+        else       g_logpath[0] = '\0';
     }
 }
 
@@ -604,46 +606,45 @@ static int selftest(void)
  * PC side needs no attention at all after setup. */
 #define TASK_NAME "kmlink"
 
+/* Append both of schtasks' streams to the log rather than letting them go to
+ * a console.  --install is usually run from a shell that is closed a moment
+ * later, and the receiver itself runs with no console at all, so every error
+ * schtasks has ever printed here has been lost.  "The task XML is malformed"
+ * existed for days before anyone read it. */
 static int run_schtasks(const char *args)
 {
     char cmd[1024];
-    snprintf(cmd, sizeof cmd, "schtasks %s", args);
-    return system(cmd);
+    int  rc;
+
+    if (g_logpath[0])
+        snprintf(cmd, sizeof cmd, "schtasks %s >>\"%s\" 2>&1", args, g_logpath);
+    else
+        snprintf(cmd, sizeof cmd, "schtasks %s", args);
+
+    rc = system(cmd);
+    logmsg("kmlink: schtasks %s -> %d\n", args, rc);
+    return rc;
 }
 
-static int install_task(void)
+/* schtasks /xml insists on UTF-16, and the obvious way to produce it does not
+ * work.  fopen(path, "w, ccs=UTF-16LE") puts the stream into the CRT's Unicode
+ * translation mode, where the narrow printf family is an invalid parameter:
+ * the handler returns failure, nothing is written, and fopen and fclose both
+ * report success.  The file left on disk is a two-byte BOM, which schtasks
+ * reads and calls malformed -- naming the XML, which is innocent.
+ *
+ * So do the conversion here and write bytes.  Returns the number written, or
+ * 0, and the caller logs it: a writer that silently produced an empty file is
+ * the whole reason this exists. */
+static size_t write_task_xml(const char *path, const char *exe)
 {
-    char  exe[MAX_PATH], xml[MAX_PATH], cmd[1024], fw[1024];
-    FILE *f;
+    static const unsigned char bom[2] = { 0xFF, 0xFE };
+    char     narrow[4096];
+    wchar_t  wide[4096];
+    int      n, w;
+    FILE    *f;
 
-    if (!GetModuleFileNameA(NULL, exe, sizeof exe)) {
-        logmsg("kmlink: cannot determine my own path\n");
-        return 1;
-    }
-
-    /* Defined as XML rather than with schtasks switches, because the settings
-     * that matter here are not exposed as switches and their defaults are
-     * wrong for a handheld:
-     *
-     *   DisallowStartIfOnBatteries  defaults true  -> never starts on battery
-     *   StopIfGoingOnBatteries      defaults true  -> dies when unplugged
-     *   ExecutionTimeLimit          defaults 72h   -> killed after three days
-     *
-     * On a device that is usually on battery, the first two mean the task is
-     * created, reports success, and never runs.
-     *
-     * The two triggers and RestartOnFailure are about the same problem from
-     * the other end.  A LogonTrigger alone fires once a day: if the receiver
-     * ever stops, nothing brings it back until the next sign-in, which is
-     * indistinguishable from the receiver never having worked.  SessionUnlock
-     * fires on every resume from standby -- the common case on a handheld --
-     * and MultipleInstancesPolicy plus the single-instance mutex make a
-     * redundant start harmless. */
-    snprintf(xml, sizeof xml, "%s\\kmlink-task.xml", getenv("TEMP"));
-    f = fopen(xml, "w, ccs=UTF-16LE");     /* schtasks /xml wants UTF-16 */
-    if (!f) { logmsg("kmlink: cannot write %s\n", xml); return 1; }
-
-    fprintf(f,
+    n = snprintf(narrow, sizeof narrow,
         "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
         "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
         "  <RegistrationInfo><Description>kmlink receiver</Description></RegistrationInfo>\n"
@@ -669,7 +670,62 @@ static int install_task(void)
         "  </Settings>\n"
         "  <Actions Context=\"Author\"><Exec><Command>%s</Command></Exec></Actions>\n"
         "</Task>\n", exe);
-    fclose(f);
+    if (n <= 0 || n >= (int)sizeof narrow) return 0;
+
+    /* CP_ACP, not CP_UTF8: exe came from GetModuleFileNameA, so it is already
+     * in the ANSI code page.  A user name outside ASCII would be mangled by
+     * decoding it as UTF-8. */
+    w = MultiByteToWideChar(CP_ACP, 0, narrow, n, wide,
+                            (int)(sizeof wide / sizeof wide[0]));
+    if (w <= 0) return 0;
+
+    f = fopen(path, "wb");
+    if (!f) return 0;
+    if (fwrite(bom, 1, sizeof bom, f) != sizeof bom ||
+        fwrite(wide, sizeof(wchar_t), (size_t)w, f) != (size_t)w) {
+        fclose(f);
+        return 0;
+    }
+    if (fclose(f) != 0) return 0;
+    return sizeof bom + (size_t)w * sizeof(wchar_t);
+}
+
+static int install_task(void)
+{
+    char   exe[MAX_PATH], xml[MAX_PATH], cmd[1024], fw[1024];
+    size_t wrote;
+
+    if (!GetModuleFileNameA(NULL, exe, sizeof exe)) {
+        logmsg("kmlink: cannot determine my own path\n");
+        return 1;
+    }
+
+    /* Defined as XML rather than with schtasks switches, because the settings
+     * that matter here are not exposed as switches and their defaults are
+     * wrong for a handheld:
+     *
+     *   DisallowStartIfOnBatteries  defaults true  -> never starts on battery
+     *   StopIfGoingOnBatteries      defaults true  -> dies when unplugged
+     *   ExecutionTimeLimit          defaults 72h   -> killed after three days
+     *
+     * On a device that is usually on battery, the first two mean the task is
+     * created, reports success, and never runs.
+     *
+     * The two triggers and RestartOnFailure are about the same problem from
+     * the other end.  A LogonTrigger alone fires once a day: if the receiver
+     * ever stops, nothing brings it back until the next sign-in, which is
+     * indistinguishable from the receiver never having worked.  SessionUnlock
+     * fires on every resume from standby -- the common case on a handheld --
+     * and MultipleInstancesPolicy plus the single-instance mutex make a
+     * redundant start harmless. */
+    snprintf(xml, sizeof xml, "%s\\kmlink-task.xml", getenv("TEMP"));
+    wrote = write_task_xml(xml, exe);
+    if (wrote == 0) {
+        logmsg("kmlink: could not write the task definition to %s\n", xml);
+        return 1;
+    }
+    logmsg("kmlink: task definition written to %s (%u bytes)\n",
+           xml, (unsigned)wrote);
 
     snprintf(cmd, sizeof cmd, "/create /tn \"%s\" /xml \"%s\" /f", TASK_NAME, xml);
     if (run_schtasks(cmd) != 0) {

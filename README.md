@@ -103,6 +103,24 @@ takes it back.
 | Clipboard | text, Mac → PC |
 | Encryption | AES-256-GCM on both transports |
 
+## Optional: switch the external display
+
+If you have an external monitor and want it freed when you hand control to the
+PC — so you can switch its input over — install displayplacer:
+
+```sh
+brew install displayplacer
+```
+
+kmlink captures your display layout at startup, turns off everything except the
+built-in screen when you switch to the PC, and puts it back when you switch
+away, quit, or the process is killed. Without displayplacer it leaves displays
+alone and says so at startup.
+
+There is no public API to disable a display, which is why this needs an outside
+tool. Every exit path restores the layout, because leaving a monitor switched
+off is a bad way to fail.
+
 ## What it doesn't do
 
 Deliberately, because each one is a source of bugs and none were wanted:

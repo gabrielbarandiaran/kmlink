@@ -225,6 +225,78 @@ final class ClipboardWatcher {
     }
 }
 
+// MARK: - External displays
+
+/// Turns the external display off while the PC has control, so the monitor is
+/// free to show the PC instead.
+///
+/// There is no public API to disable a display, so this shells out to
+/// displayplacer. The layout is captured once at startup and restored on the
+/// way back, on quit, and on a signal -- leaving a display switched off is a
+/// bad failure mode, so every exit path restores.
+final class Displays {
+    private let tool: String?
+    private var restoreArgs: [String] = []
+    private var soloArgs: [String] = []
+    var enabled: Bool { tool != nil && !restoreArgs.isEmpty && !soloArgs.isEmpty }
+
+    init() {
+        let candidates = ["/opt/homebrew/bin/displayplacer", "/usr/local/bin/displayplacer"]
+        tool = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        capture()
+    }
+
+    private func run(_ path: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: out, encoding: .utf8)
+    }
+
+    private func capture() {
+        guard let tool, let listing = run(tool, ["list"]) else { return }
+        // The tool prints a ready-made command to reproduce the current layout.
+        guard let line = listing.split(separator: "\n")
+                .last(where: { $0.hasPrefix("displayplacer \"") }) else { return }
+
+        let specs = line.components(separatedBy: "\"").filter { $0.contains("id:") }
+        guard specs.count >= 2 else { return }   // nothing to do with one display
+
+        restoreArgs = specs
+        // The built-in screen is the one at the origin; everything else goes off.
+        soloArgs = specs.map { spec in
+            spec.contains("origin:(0,0)") ? spec
+                                          : spec.replacingOccurrences(of: "enabled:true",
+                                                                      with: "enabled:false")
+        }
+    }
+
+    private func apply(_ args: [String]) {
+        guard let tool, !args.isEmpty else { return }
+        // Reconfiguring takes about a second; never do it on the event tap.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.run(tool, args)
+        }
+    }
+
+    func laptopOnly() { apply(soloArgs) }
+    func restore()    { apply(restoreArgs) }
+
+    /// Synchronous, for exit paths where the process is about to disappear.
+    func restoreNow() {
+        guard let tool, !restoreArgs.isEmpty else { return }
+        _ = run(tool, restoreArgs)
+    }
+}
+
+var displays: Displays?
+
 // MARK: - Menu bar
 
 /// Shows at a glance whether input is going to the Mac or the PC, and gives a
@@ -288,6 +360,7 @@ final class Controller {
         // which is why only the pointer kept drifting.
         CGAssociateMouseAndMouseCursorPosition(0)
         CGDisplayHideCursor(CGMainDisplayID())
+        displays?.laptopOnly()
 
         statusBar?.set(active: true)
         sender.send(payload(.enter), copies: 3)
@@ -307,6 +380,7 @@ final class Controller {
 
         CGAssociateMouseAndMouseCursorPosition(1)
         CGDisplayShowCursor(CGMainDisplayID())
+        displays?.restore()
 
         statusBar?.set(active: false)
         sender.send(payload(.leave), copies: 3)
@@ -539,6 +613,26 @@ print("Cmd+Ctrl+Left   take it back")
 // A status item needs a running NSApplication. .accessory keeps it out of the
 // Dock and the app switcher; the event tap source is on this run loop, which
 // NSApp.run() pumps just as CFRunLoopRun() did.
+let dm = Displays()
+displays = dm
+if dm.enabled {
+    print("external display will switch off while the PC has control")
+} else {
+    print("displayplacer not found or only one display; leaving displays alone")
+}
+
+// Never leave a display switched off. Covers quit from the menu bar, Ctrl-C,
+// and being terminated.
+atexit { displays?.restoreNow() }
+for sig in [SIGINT, SIGTERM, SIGHUP] {
+    signal(sig) { _ in
+        displays?.restoreNow()
+        CGAssociateMouseAndMouseCursorPosition(1)
+        CGDisplayShowCursor(CGMainDisplayID())
+        exit(0)
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let bar = StatusBar(host: host)

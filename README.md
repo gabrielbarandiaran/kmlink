@@ -103,23 +103,18 @@ takes it back.
 | Clipboard | text, Mac → PC |
 | Encryption | AES-256-GCM on both transports |
 
-## Optional: switch the external display
+## External monitors
 
-If you have an external monitor and want it freed when you hand control to the
-PC — so you can switch its input over — install displayplacer:
+kmlink does not touch your display configuration. If one monitor is wired to
+both machines, switch its input with its own buttons.
 
-```sh
-brew install displayplacer
-```
-
-kmlink captures your display layout at startup, turns off everything except the
-built-in screen when you switch to the PC, and puts it back when you switch
-away, quit, or the process is killed. Without displayplacer it leaves displays
-alone and says so at startup.
-
-There is no public API to disable a display, which is why this needs an outside
-tool. Every exit path restores the layout, because leaving a monitor switched
-off is a bad way to fail.
+An earlier version turned the external display off while the PC had control,
+using `displayplacer`. That is removed: disabling a display takes it offline,
+so it leaves the display list and there is no longer an id to address. On this
+Mac `displayplacer "id:<it> enabled:true"` answers *"Unable to find screen"*
+and exits 1 — displayplacer's own notes warn you may have to unplug and replug
+the cable to get the screen back. A feature that can strand a monitor is worse
+than no feature.
 
 ## What it doesn't do
 

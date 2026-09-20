@@ -71,6 +71,19 @@ reading actual output — `schtasks /query /v`, the empty process list, the
 `Power Management` line. The guesses in between were wrong, twice blaming the
 network when measurement later showed it was fine.
 
+## Removed
+
+- **Switching the external display off while the PC had control.** Sound idea,
+  unsound mechanism: disabling a display takes it *offline*, so it leaves the
+  display list and there is no id left to re-enable. On this Mac
+  `displayplacer "id:<it> enabled:true"` answers *"Unable to find screen"* and
+  exits 1, and a replug did not bring it back either. `Displays.run()` threw
+  the exit code away, so every failed restore reported success — the same
+  failure mode as the nine faults above. The commit that added it said
+  "leaving a display switched off with no obvious way back is a bad failure
+  mode, worse than the feature is useful", which is exactly what happened.
+  Removed rather than patched.
+
 ## Things deliberately left
 
 - **Clipboard is Mac → PC only.** Reverse direction not implemented.
@@ -87,7 +100,7 @@ network when measurement later showed it was fine.
 ## Layout
 
 ```
-mac/kmlink.swift     sender: event tap, UDP, clipboard, menu bar, displayplacer
+mac/kmlink.swift     sender: event tap, UDP, clipboard, menu bar
 win/kmlink-win.c     receiver: single-threaded recvfrom -> SendInput
 PROTOCOL.md          wire format; both halves must agree byte for byte
 build-mac.sh         builds and installs the signed .app

@@ -227,8 +227,34 @@ static void send_key(rxstate *st, BYTE vk, int down)
     in.ki.wScan   = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
     in.ki.dwFlags = (DWORD)((down ? 0 : KEYEVENTF_KEYUP) |
                             (key_is_extended(vk) ? KEYEVENTF_EXTENDEDKEY : 0));
-    SendInput(1, &in, sizeof in);
+    injected(SendInput(1, &in, sizeof in));
     st->key_down[vk] = (unsigned char)(down ? 1 : 0);
+}
+
+/* SendInput fails, returning 0, when UIPI blocks us: the foreground window
+ * belongs to a process at a higher integrity level (an elevated game, its
+ * anti-cheat, or a UAC prompt) and a non-elevated sender may not inject into
+ * it.  Running as administrator fixes that case.
+ *
+ * It does NOT fail when a game reads raw input and chooses to ignore events
+ * flagged as injected.  There the call succeeds and the game simply disregards
+ * it, which no user-space program can work around.
+ *
+ * Distinguishing the two matters, so report failures -- rate limited, because
+ * this sits on the hot path and per-event logging is exactly what this program
+ * exists to avoid. */
+static void injected(UINT sent)
+{
+    static ULONGLONG last_warn;
+    static unsigned  failures;
+
+    if (sent != 0) return;
+
+    failures++;
+    if (GetTickCount64() - last_warn < 2000) return;
+    last_warn = GetTickCount64();
+    printf("SendInput refused (%u so far). The focused window is likely "
+           "elevated -- run kmlink as administrator.\n", failures);
 }
 
 static void send_mouse(DWORD flags, LONG dx, LONG dy, DWORD data)
@@ -241,7 +267,7 @@ static void send_mouse(DWORD flags, LONG dx, LONG dy, DWORD data)
     in.mi.dy        = dy;
     in.mi.mouseData = data;
     in.mi.dwFlags   = flags;
-    SendInput(1, &in, sizeof in);
+    injected(SendInput(1, &in, sizeof in));
 }
 
 static const DWORD btn_flags[3][2] = {              /* [button-1][down] */

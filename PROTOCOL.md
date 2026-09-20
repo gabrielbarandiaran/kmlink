@@ -61,6 +61,11 @@ u32  seq
 key-up is lost, the next packet re-synchronises it, so a modifier cannot stick
 down. This is what makes UDP safe for a keyboard.
 
+**`vk = 0` means "modifier state only"** — no key is pressed or released. The
+sender emits it when a modifier changes on its own. The receiver must still
+reconcile modifiers from it; dropping it as an invalid keycode loses
+Shift-click and Cmd-scroll.
+
 ### Key mapping happens on the Mac
 
 The Mac translates its own keycodes into Windows virtual-key codes before

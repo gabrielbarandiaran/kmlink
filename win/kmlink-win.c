@@ -614,9 +614,13 @@ static int install_task(void)
                "  \"%s\" --install\n", exe);
         return 1;
     }
-    logmsg("kmlink: installed. It will start at every logon, elevated.\n"
-           "Starting it now.\n");
-    run_schtasks("/run /tn \"" TASK_NAME "\"");
+    logmsg("kmlink: installed. It will start at every logon, elevated.\n");
+    if (run_schtasks("/run /tn \"" TASK_NAME "\"") != 0) {
+        logmsg("kmlink: the task was created but would not start now.\n"
+               "Sign out and back in, or run: schtasks /run /tn %s\n", TASK_NAME);
+        return 1;
+    }
+    logmsg("kmlink: started. Check %%LOCALAPPDATA%%\\kmlink\\kmlink.log\n");
     return 0;
 }
 
@@ -649,20 +653,27 @@ int main(int argc, char **argv)
 
     log_open();
 
-    /* One instance only. Two receivers on one port means the second fails to
-     * bind and the user is left wondering which is running. */
-    CreateMutexA(NULL, TRUE, "Global\\kmlink_single_instance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS && argc == 1) {
-        logmsg("kmlink: already running\n");
-        return 0;
-    }
-
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return selftest();
     if (argc > 1 && strcmp(argv[1], "--install") == 0)
         return install_task();
     if (argc > 1 && strcmp(argv[1], "--uninstall") == 0)
         return uninstall_task();
+
+    /* One listener only -- but claim this AFTER the flags above, and never in
+     * --install. --install spawns the real instance via schtasks while it is
+     * still running; if it held this mutex, that instance would see it taken,
+     * report "already running" and exit, leaving nothing listening while
+     * --install cheerfully reported success.
+     *
+     * Session-local, not Global\: the global namespace needs a privilege that
+     * a non-elevated run does not have, and one listener per session is what
+     * is actually wanted. */
+    CreateMutexA(NULL, TRUE, "kmlink_single_instance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        logmsg("kmlink: already running\n");
+        return 0;
+    }
 
     if (!key_path(path, sizeof path)) {
         logmsg("kmlink: cannot resolve %%LOCALAPPDATA%%\n");

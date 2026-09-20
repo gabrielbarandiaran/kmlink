@@ -280,6 +280,15 @@ final class Controller {
     func enter() {
         guard !active else { return }
         active = true
+
+        // Swallowing mouseMoved in the tap does NOT stop the cursor: the window
+        // server moves it from the HID layer, independently of the event
+        // stream. Breaking that association is what actually freezes it, while
+        // deltas still reach the tap. Clicks and keys were already suppressed,
+        // which is why only the pointer kept drifting.
+        CGAssociateMouseAndMouseCursorPosition(0)
+        CGDisplayHideCursor(CGMainDisplayID())
+
         statusBar?.set(active: true)
         sender.send(payload(.enter), copies: 3)
         FileHandle.standardError.write("-> windows\n".data(using: .utf8)!)
@@ -295,6 +304,10 @@ final class Controller {
         }
         heldKeys.removeAll()
         active = false
+
+        CGAssociateMouseAndMouseCursorPosition(1)
+        CGDisplayShowCursor(CGMainDisplayID())
+
         statusBar?.set(active: false)
         sender.send(payload(.leave), copies: 3)
         FileHandle.standardError.write("-> mac\n".data(using: .utf8)!)

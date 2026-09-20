@@ -18,7 +18,13 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          rem Do not hardcode the Visual Studio path: the edition and version
+          rem differ between runner images. vswhere ships with the installer
+          rem and is the supported way to find it.
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+          if not defined VSPATH ( echo Visual Studio with the C++ toolset not found & exit /b 1 )
+          echo Using %VSPATH%
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           cl /nologo /W4 /O2 /guard:cf win\kmlink-win.c /Fe:kmlink-win.exe ^
              ws2_32.lib bcrypt.lib user32.lib /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA
 

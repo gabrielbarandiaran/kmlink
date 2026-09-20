@@ -58,4 +58,13 @@ fi
 codesign --force --sign "$KMLINK_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$APP"
 codesign --verify --strict "$APP"
 
-echo "built: $(pwd)/$APP"
+# Install straight to /Applications and leave nothing runnable behind. Two
+# bundles sharing one identifier make macOS evaluate the Accessibility grant
+# against a different copy than the one you enabled, and it silently keeps
+# asking.
+rm -rf "/Applications/$APP"
+cp -R "$APP" "/Applications/$APP"
+rm -rf "$APP"
+codesign --verify --strict "/Applications/$APP"
+
+echo "installed: /Applications/$APP"

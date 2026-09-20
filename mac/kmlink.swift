@@ -12,6 +12,7 @@ import Foundation
 import CoreGraphics
 import CryptoKit
 import AppKit
+import IOKit.hid
 
 // MARK: - Constants
 
@@ -393,6 +394,24 @@ if args.count >= 2, !args[1].hasPrefix("--") {
 
 guard let keyData = loadKey() else {
     FileHandle.standardError.write("No key at \(KEY_FILE.path)\nRun: kmlink --genkey\n".data(using: .utf8)!)
+    exit(1)
+}
+
+// Input Monitoring is a SEPARATE grant from Accessibility, and a keyboard tap
+// needs it. Without it macOS quietly downgrades the tap to listen-only: mouse
+// events still arrive but cannot be suppressed, and keyboard events are
+// withheld entirely. The symptom is "the mouse works, the keyboard does not,
+// and the Mac cursor moves too" -- which looks like a bug in the tap rather
+// than a missing permission.
+if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+    _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    FileHandle.standardError.write("""
+        Input Monitoring permission is required to read the keyboard.
+
+        Approve the dialog, or enable kmlink in System Settings -> Privacy &
+        Security -> Input Monitoring. Then run this again.
+
+        """.data(using: .utf8)!)
     exit(1)
 }
 

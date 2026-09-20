@@ -17,6 +17,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <bcrypt.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -217,6 +218,36 @@ static int key_is_extended(BYTE vk)
     }
 }
 
+/* ------------------------------------------------------------------ log */
+
+/* Built for the WINDOWS subsystem so no console appears, which means printf
+ * goes nowhere. Diagnostics still matter -- "input stops in games" is only
+ * diagnosable from the SendInput message -- so write them to a file, and also
+ * to the console when there is one (--selftest, --install, run from a prompt). */
+static FILE *g_log;
+
+static void log_open(void)
+{
+    char path[MAX_PATH];
+    const char *base = getenv("LOCALAPPDATA");
+
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        setvbuf(stdout, NULL, _IONBF, 0);
+    }
+    if (base && snprintf(path, sizeof path, "%s\\kmlink\\kmlink.log", base) > 0) {
+        g_log = fopen(path, "a");
+        if (g_log) setvbuf(g_log, NULL, _IONBF, 0);
+    }
+}
+
+static void logmsg(const char *fmt, ...)
+{
+    va_list ap;
+    if (stdout) { va_start(ap, fmt); vprintf(fmt, ap); va_end(ap); }
+    if (g_log)  { va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap); }
+}
+
 /* SendInput fails, returning 0, when UIPI blocks us: the foreground window
  * belongs to a process at a higher integrity level (an elevated game, its
  * anti-cheat, or a UAC prompt) and a non-elevated sender may not inject into
@@ -239,7 +270,7 @@ static void injected(UINT sent)
     failures++;
     if (GetTickCount64() - last_warn < 2000) return;
     last_warn = GetTickCount64();
-    printf("SendInput refused (%u so far). The focused window is likely "
+    logmsg("SendInput refused (%u so far). The focused window is likely "
            "elevated -- run kmlink as administrator.\n", failures);
 }
 
@@ -537,17 +568,66 @@ static int selftest(void)
     unsigned char out[64];
     ULONG         outlen = 0;
 
-    if (!crypto_init())     { printf("selftest: crypto_init failed\n"); return 1; }
-    if (!key_make(&k, key)) { printf("selftest: key_make failed\n");    return 1; }
+    if (!crypto_init())     { logmsg("selftest: crypto_init failed\n"); return 1; }
+    if (!key_make(&k, key)) { logmsg("selftest: key_make failed\n");    return 1; }
     if (!aes_open(&k, combined, (ULONG)sizeof combined, out, (ULONG)sizeof out, &outlen)) {
-        printf("selftest: authentication FAILED -- CryptoKit and BCrypt disagree\n");
+        logmsg("selftest: authentication FAILED -- CryptoKit and BCrypt disagree\n");
         return 1;
     }
     if (outlen != (ULONG)sizeof want || memcmp(out, want, sizeof want) != 0) {
-        printf("selftest: plaintext mismatch (%lu bytes)\n", (unsigned long)outlen);
+        logmsg("selftest: plaintext mismatch (%lu bytes)\n", (unsigned long)outlen);
         return 1;
     }
-    printf("selftest: AES-256-GCM interop ok\n");
+    logmsg("selftest: AES-256-GCM interop ok\n");
+    return 0;
+}
+
+/* -------------------------------------------------------------- autostart */
+
+/* A scheduled task rather than a Run key, for one reason: a Run key cannot
+ * run elevated, and elevation is what lets SendInput reach games whose window
+ * belongs to a higher integrity process. At logon, highest privileges, so the
+ * PC side needs no attention at all after setup. */
+#define TASK_NAME "kmlink"
+
+static int run_schtasks(const char *args)
+{
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "schtasks %s", args);
+    return system(cmd);
+}
+
+static int install_task(void)
+{
+    char exe[MAX_PATH], args[1024];
+
+    if (!GetModuleFileNameA(NULL, exe, sizeof exe)) {
+        logmsg("kmlink: cannot determine my own path\n");
+        return 1;
+    }
+    snprintf(args, sizeof args,
+             "/create /tn \"%s\" /tr \"\\\"%s\\\"\" /sc onlogon /rl highest /f",
+             TASK_NAME, exe);
+    if (run_schtasks(args) != 0) {
+        logmsg("kmlink: could not create the scheduled task.\n"
+               "Run this from an administrator prompt:\n"
+               "  \"%s\" --install\n", exe);
+        return 1;
+    }
+    logmsg("kmlink: installed. It will start at every logon, elevated.\n"
+           "Starting it now.\n");
+    run_schtasks("/run /tn \"" TASK_NAME "\"");
+    return 0;
+}
+
+static int uninstall_task(void)
+{
+    run_schtasks("/end /tn \"" TASK_NAME "\"");
+    if (run_schtasks("/delete /tn \"" TASK_NAME "\" /f") != 0) {
+        logmsg("kmlink: no scheduled task to remove (or not elevated)\n");
+        return 1;
+    }
+    logmsg("kmlink: autostart removed\n");
     return 0;
 }
 
@@ -567,15 +647,29 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IONBF, 0);     /* nothing is logged per event */
 
+    log_open();
+
+    /* One instance only. Two receivers on one port means the second fails to
+     * bind and the user is left wondering which is running. */
+    CreateMutexA(NULL, TRUE, "Global\\kmlink_single_instance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS && argc == 1) {
+        logmsg("kmlink: already running\n");
+        return 0;
+    }
+
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return selftest();
+    if (argc > 1 && strcmp(argv[1], "--install") == 0)
+        return install_task();
+    if (argc > 1 && strcmp(argv[1], "--uninstall") == 0)
+        return uninstall_task();
 
     if (!key_path(path, sizeof path)) {
-        printf("kmlink: cannot resolve %%LOCALAPPDATA%%\n");
+        logmsg("kmlink: cannot resolve %%LOCALAPPDATA%%\n");
         return 1;
     }
     if (!read_hex_key(path, raw)) {
-        printf("kmlink: no usable key at %s\n"
+        logmsg("kmlink: no usable key at %s\n"
                "        Run `kmlink --genkey` on the Mac, then save the 64-character\n"
                "        hex key it prints into that file (create the folder first).\n", path);
         return 1;
@@ -584,26 +678,26 @@ int main(int argc, char **argv)
     memset(&st, 0, sizeof st);
     memset(&clip, 0, sizeof clip);
     if (!crypto_init() || !key_make(&ukey, raw) || !key_make(&clip.key, raw)) {
-        printf("kmlink: BCrypt AES-GCM setup failed\n");
+        logmsg("kmlink: BCrypt AES-GCM setup failed\n");
         return 1;
     }
     SecureZeroMemory(raw, sizeof raw);
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        printf("kmlink: WSAStartup failed\n");
+        logmsg("kmlink: WSAStartup failed\n");
         return 1;
     }
     usock         = bind_listener(0);
     clip.listener = bind_listener(1);
     if (usock == INVALID_SOCKET || clip.listener == INVALID_SOCKET) {
-        printf("kmlink: cannot bind port %d (already in use?)\n", PORT);
+        logmsg("kmlink: cannot bind port %d (already in use?)\n", PORT);
         return 1;
     }
     if (!CreateThread(NULL, 0, clipboard_thread, &clip, 0, NULL)) {
-        printf("kmlink: cannot start the clipboard thread\n");
+        logmsg("kmlink: cannot start the clipboard thread\n");
         return 1;
     }
-    printf("kmlink: listening on udp/tcp %d, key loaded from %s\n", PORT, path);
+    logmsg("kmlink: listening on udp/tcp %d, key loaded from %s\n", PORT, path);
 
     for (;;) {
         struct sockaddr_in from;
@@ -622,14 +716,14 @@ int main(int argc, char **argv)
             release_all(&st);
             st.have_seq = 0;    /* a gap means a new session; let its seq restart */
             linked = 0;
-            printf("kmlink: link idle, released everything held\n");
+            logmsg("kmlink: link idle, released everything held\n");
         }
 
         if (n == SOCKET_ERROR) {
             int e = WSAGetLastError();
             if (e == WSAETIMEDOUT || e == WSAEMSGSIZE || e == WSAECONNRESET || e == WSAEINTR)
                 continue;
-            printf("kmlink: recvfrom failed (%d)\n", e);
+            logmsg("kmlink: recvfrom failed (%d)\n", e);
             return 1;
         }
         if (n < PKT_MIN) continue;
@@ -646,10 +740,10 @@ int main(int argc, char **argv)
             peer_port = from.sin_port;
             have_peer = 1;
             if (InetNtopA(AF_INET, &from.sin_addr, ip, sizeof ip))
-                printf("kmlink: input from %s\n", ip);
+                logmsg("kmlink: input from %s\n", ip);
         }
 
         if (dispatch(&st, plain, plen))
-            printf("kmlink: leave, released everything held\n");
+            logmsg("kmlink: leave, released everything held\n");
     }
 }

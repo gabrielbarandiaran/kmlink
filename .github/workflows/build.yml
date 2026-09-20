@@ -25,8 +25,13 @@ jobs:
           if not defined VSPATH ( echo Visual Studio with the C++ toolset not found & exit /b 1 )
           echo Using %VSPATH%
           call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          rem /SUBSYSTEM:WINDOWS with mainCRTStartup: no console window ever
+          rem appears, but main() is still the entry point. Diagnostics go to
+          rem %LOCALAPPDATA%\kmlink\kmlink.log, and to the console when one exists.
           cl /nologo /W4 /O2 /guard:cf win\kmlink-win.c /Fe:kmlink-win.exe ^
-             ws2_32.lib bcrypt.lib user32.lib /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA
+             ws2_32.lib bcrypt.lib user32.lib advapi32.lib ^
+             /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
+             /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 
       - name: Crypto interop self-test
         shell: pwsh

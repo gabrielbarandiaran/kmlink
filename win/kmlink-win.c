@@ -344,9 +344,14 @@ static int dispatch(rxstate *st, const unsigned char *p, ULONG n)
     case T_KEY:
         if (n < HDR_LEN + 7) return 0;
         vk = be16(p + 5);
-        if (vk == 0 || vk > 0xFF) return 0;              /* not a Windows vk */
+        if (vk > 0xFF) return 0;                         /* not a Windows vk */
         reconcile_mods(st, be32(p + 8));
-        send_key(st, (BYTE)vk, p[7] != 0);
+        /* vk 0 carries modifier state only: the sender emits it when a
+         * modifier changes on its own.  Rejecting it before reconciling
+         * means holding Shift or Cmd alone never reaches us, and
+         * Shift-click loses its modifier. */
+        if (vk != 0)
+            send_key(st, (BYTE)vk, p[7] != 0);
         return 0;
 
     case T_ENTER:
@@ -481,7 +486,46 @@ static SOCKET bind_listener(int stream)
     return s;
 }
 
-int main(void)
+/* ------------------------------------------------------------- self test */
+
+/* The one thing that cannot be checked from the Mac: that BCrypt reads exactly
+ * what CryptoKit wrote.  If they disagree on nonce or tag placement then every
+ * packet fails authentication at runtime, with no symptom but silence.  This
+ * vector came from CryptoKit; see test/aes-gcm-vector.txt.  CI runs it. */
+static int selftest(void)
+{
+    static const unsigned char key[32] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+        0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f
+    };
+    /* nonce(12) || ciphertext(9) || tag(16) */
+    static const unsigned char combined[37] = {
+        0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,
+        0xe7,0x18,0x7c,0x2d,0x44,0xcb,0x07,0x40,0x9f,
+        0x70,0x2b,0x01,0x7b,0xe0,0x4f,0x28,0x21,0x8f,0x82,0x63,0x55,0x56,0x4c,0xf8,0x0a
+    };
+    /* MOVE, seq=1, dx=+5, dy=-3 */
+    static const unsigned char want[9] = { 0x01,0x00,0x00,0x00,0x01,0x00,0x05,0xff,0xfd };
+
+    aeskey        k;
+    unsigned char out[64];
+    ULONG         outlen = 0;
+
+    if (!crypto_init())     { printf("selftest: crypto_init failed\n"); return 1; }
+    if (!key_make(&k, key)) { printf("selftest: key_make failed\n");    return 1; }
+    if (!aes_open(&k, combined, (ULONG)sizeof combined, out, (ULONG)sizeof out, &outlen)) {
+        printf("selftest: authentication FAILED -- CryptoKit and BCrypt disagree\n");
+        return 1;
+    }
+    if (outlen != (ULONG)sizeof want || memcmp(out, want, sizeof want) != 0) {
+        printf("selftest: plaintext mismatch (%lu bytes)\n", (unsigned long)outlen);
+        return 1;
+    }
+    printf("selftest: AES-256-GCM interop ok\n");
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     unsigned char raw[32], dgram[PKT_MAX], plain[PKT_MAX];
     char          path[MAX_PATH];
@@ -496,6 +540,9 @@ int main(void)
     uint16_t      peer_port = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);     /* nothing is logged per event */
+
+    if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
+        return selftest();
 
     if (!key_path(path, sizeof path)) {
         printf("kmlink: cannot resolve %%LOCALAPPDATA%%\n");

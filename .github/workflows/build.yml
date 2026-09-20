@@ -39,8 +39,14 @@ jobs:
           # The one thing that cannot be checked on the Mac: that BCrypt reads
           # exactly what CryptoKit wrote. If this fails, every packet would fail
           # authentication at runtime and nothing would work.
-          ./kmlink-win.exe --selftest
-          if ($LASTEXITCODE -ne 0) { throw "AES-GCM interop self-test failed" }
+          #
+          # Start-Process -Wait because this is a WINDOWS-subsystem binary now:
+          # the shell does not wait for one, so $LASTEXITCODE would be whatever
+          # ran before it.
+          $p = Start-Process -FilePath ./kmlink-win.exe -ArgumentList '--selftest' `
+                             -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "AES-GCM interop self-test failed ($($p.ExitCode))" }
+          Write-Host "AES-256-GCM interop ok (exit 0)"
 
       - name: Package
         shell: pwsh

@@ -1,0 +1,7 @@
+# built binaries
+/kmlink
+*.exe
+*.o
+*.obj
+build/
+out/

@@ -1,0 +1,64 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl /nologo /W4 /O2 /guard:cf win\kmlink-win.c /Fe:kmlink-win.exe ^
+             ws2_32.lib bcrypt.lib user32.lib /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA
+
+      - name: Crypto interop self-test
+        shell: pwsh
+        run: |
+          # The one thing that cannot be checked on the Mac: that BCrypt reads
+          # exactly what CryptoKit wrote. If this fails, every packet would fail
+          # authentication at runtime and nothing would work.
+          ./kmlink-win.exe --selftest
+          if ($LASTEXITCODE -ne 0) { throw "AES-GCM interop self-test failed" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item kmlink-win.exe out
+          Copy-Item README.md, PROTOCOL.md out
+          Get-ChildItem out | ForEach-Object { Write-Host "  $($_.Name)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kmlink-windows
+          path: out
+          if-no-files-found: error
+
+      - name: Publish to the rolling release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path out/* -DestinationPath kmlink-windows.zip -Force
+          gh release upload windows kmlink-windows.zip --clobber --repo $env:GITHUB_REPOSITORY
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: ./build-mac.sh
+      - name: Check it runs
+        run: ./kmlink 2>&1 | grep -q "usage:" && echo "ok"

@@ -1,16 +1,18 @@
 # kmlink
 
-Use your MacBook's keyboard and trackpad on a Windows PC. Switch with a hotkey.
+Use your MacBook's keyboard and trackpad on a SteamOS handheld (here, an ROG
+Ally — "the PC" below). Switch with a hotkey.
 
-Two small programs and nothing else: no config files, no service, no daemon, no
-screen-edge geometry to get right.
+Two small programs and a shared key. Nothing to configure beyond the PC's
+address, and no screen-edge geometry to get right.
 
 ```
 Cmd+Ctrl+→    input goes to the PC
 Cmd+Ctrl+←    input comes back to the Mac
 ```
 
-Clipboard follows along. Everything is encrypted.
+Everything is encrypted. The clipboard does not follow along yet on SteamOS —
+see [What it doesn't do](#what-it-doesnt-do).
 
 ## Why it exists
 
@@ -50,7 +52,7 @@ cp -R kmlink.app /Applications/
 
 `--genkey` prints a 64-character key and saves it (mode 0600). You need it in
 step 2. `--set-host` is the PC's address, remembered so the app can be launched
-with no arguments.
+with no arguments; step 2 shows how to find it.
 
 Then **open the app once**:
 
@@ -72,49 +74,81 @@ It asks for Accessibility permission and registers itself in **System Settings
 > ad-hoc signature changes on every rebuild and macOS then treats each build as
 > a different app and drops the grant.
 
-### 2. Windows
+### 2. SteamOS
 
-Download `kmlink-win.exe` from the Releases page, or build it yourself from
-`win/kmlink-win.c`.
+**Not yet tried on the device.** The SteamOS receiver builds, but it has never
+run on the Ally. [STATUS.md](STATUS.md) lists what to watch the first time.
 
-Create `%LOCALAPPDATA%\kmlink\key.txt` and paste in the same key from step 1.
-Both machines must have identical keys.
+On the PC, switch to Desktop Mode and open Konsole. Every command below is a
+single line on purpose — a multi-line paste once broke an install without any
+error — so paste them one at a time.
 
-Run it. Allow the firewall prompt.
-
-To have it start on its own, from an administrator prompt:
-
-```
-kmlink-win.exe --install
-```
-
-That registers a scheduled task that starts at sign-in and on every unlock,
-runs elevated, is not gated on mains power, and restarts itself if it exits.
-It also adds the firewall rule, because a task started in the background has
-no window and so can never show you the firewall prompt.
-
-#### Power settings it changes
-
-A handheld spends its life on battery, and Windows' battery defaults are all
-wrong for something whose whole job is to be listening. `--install` sets the
-**wireless adapter power saving mode to Maximum Performance** on both AC and
-battery, because the low-power mode parks the radio between beacons and
-datagrams then arrive in bursts or not at all.
-
-`--uninstall` does not undo it — the previous value is not recorded anywhere.
-To put it back to the balanced default:
-
-```
-powercfg /setdcvalueindex SCHEME_CURRENT SUB_WIRELESSADAPTER 12bbebe6-58d6-4636-95bb-3217ef867c1a 2
-powercfg /setactive SCHEME_CURRENT
+```sh
+mkdir -p ~/.local/bin ~/.config/kmlink
+curl -fL -o ~/.local/bin/kmlink.new https://github.com/gabrielbarandiaran/kmlink/releases/download/linux/kmlink-linux
+chmod +x ~/.local/bin/kmlink.new
+mv ~/.local/bin/kmlink.new ~/.local/bin/kmlink
 ```
 
-One power setting is left to you, because it resets the adapter and is
-per-device rather than per-scheme — *Allow the computer to turn off this device
-to save power*, on the Wi-Fi adapter in Device Manager. Or:
+`-f` matters: without it, a missing file is saved as an error page and curl
+still reports success. The download lands under a second name and is moved
+into place because Linux refuses to overwrite a program while it is running —
+which, once installed, it always is — but does allow moving a new file over
+it. The same lines are how you update it later; run `--install` again
+afterwards to restart on the new copy.
 
+Everything goes in your home folder on purpose: SteamOS replaces its system
+partition when it updates, so anything installed outside home would vanish.
+CI rebuilds that download on every push. To build it yourself instead, run
+`./build-linux.sh` on the Mac and copy `out/kmlink-linux` across, again under
+a second name and then moved into place.
+
+Put the key from step 1 in `~/.config/kmlink/key.txt`. Both machines must have
+identical keys. The easy way across, rather than typing 64 characters on a
+handheld, is to serve it from the Mac for a moment. On the Mac:
+
+```sh
+python3 -m http.server 8000 --directory ~/Library/Application\ Support/kmlink
 ```
-powershell -Command "Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Disable-NetAdapterPowerManagement"
+
+On the PC, with the Mac's address in place of this one:
+
+```sh
+curl -f -o ~/.config/kmlink/key.txt http://192.168.1.20:8000/key.txt
+```
+
+Stop the server on the Mac with Ctrl+C straight away: while it runs, anyone on
+the network can fetch the key. Then make it readable only by you:
+
+```sh
+chmod 600 ~/.config/kmlink/key.txt
+```
+
+Install it so it starts on its own:
+
+```sh
+~/.local/bin/kmlink --install
+```
+
+That writes a systemd user service to `~/.config/systemd/user/kmlink.service`,
+enables it and restarts it. It then prints what `systemctl` actually answered
+and checks the service is active, rather than reporting success on its own
+say-so — on Windows, the success messages the installer relied on turned out to
+be lying, more than once. If the receiver hits a serious error it logs it and
+exits, and systemd starts it again, with no limit on retries.
+`--uninstall` removes the service.
+
+The PC's address, for the Mac's `--set-host`, is the `inet` line on the Wi-Fi
+interface, without the part after the slash:
+
+```sh
+ip -4 addr
+```
+
+The log:
+
+```sh
+journalctl --user -u kmlink -e
 ```
 
 ### 3. Go
@@ -128,15 +162,19 @@ open /Applications/kmlink.app
 Press **Cmd+Ctrl+→**. The PC now has your keyboard and mouse. **Cmd+Ctrl+←**
 takes it back.
 
+The PC sees them as one virtual keyboard-and-mouse named *kmlink virtual
+input*, created through `/dev/uinput`. The kernel treats it like a plugged-in
+keyboard and mouse, so Gaming Mode and Desktop Mode should both see it.
+
 ## What it does
 
 | | |
 |---|---|
 | Mouse | move, left/right/middle, scroll |
 | Keyboard | letters, digits, punctuation, F1–F12, arrows, navigation, modifiers |
-| Cmd key | becomes Ctrl on Windows, so Cmd+C and Cmd+V work as you expect |
-| Clipboard | text, Mac → PC |
-| Encryption | AES-256-GCM on both transports |
+| Cmd key | becomes Ctrl on the PC, so Cmd+C and Cmd+V work as you expect |
+| Clipboard | not there yet on SteamOS (see below) |
+| Encryption | AES-256-GCM on everything the Mac sends |
 
 ## External monitors
 
@@ -159,17 +197,24 @@ Deliberately, because each one is a source of bugs and none were wanted:
 - No screen-edge switching — the hotkey is the only way across, so the pointer
   can't wander onto the other machine by accident
 - No multi-monitor geometry
-- No clipboard from PC back to Mac (one direction for now)
-- Nothing at the Windows lock screen. It runs as you, in your session, so log in
-  with the PC's own keyboard or Windows Hello first. The alternative is a
-  SYSTEM-level service, which is exactly the thing worth avoiding.
+
+And one that is only *not yet*:
+
+- **No clipboard.** The Windows receiver took text from the Mac; the SteamOS one
+  does not yet. Setting the clipboard on SteamOS depends on whether it is in
+  Gaming Mode or Desktop Mode, and on which helper tool is installed, so it
+  waits until keys and mouse are proven on the device. Meanwhile the Mac still
+  tries to send it: the connection is refused and the Mac gives up quietly in
+  the background, so input is unaffected. PC → Mac was never there.
 
 ## Security
 
 Keystrokes include passwords, so they are not sent in the clear.
 
-- **AES-256-GCM** via CryptoKit on macOS and BCrypt on Windows. Both are
-  OS-provided; there is no third-party crypto here to vendor or keep patched.
+- **AES-256-GCM** via CryptoKit on macOS and Go's standard library on SteamOS.
+  Neither is third-party, so there is no crypto here to vendor. Go's is
+  compiled into the binary, so a Go security fix reaches the PC only with a
+  rebuild.
 - **A shared 32-byte key**, generated once. No password-derived key, so there is
   no weak KDF to get wrong.
 - **Nonces never repeat**: a per-session random prefix plus a counter.
@@ -179,8 +224,8 @@ Keystrokes include passwords, so they are not sent in the clear.
 - The receiver **releases every held key** on disconnect or a 3-second silence,
   so a dropped link can't leave Ctrl stuck down on the PC.
 
-The key file is 0600 on macOS. Anyone who can read it can send input to your PC,
-so treat it like a password.
+The key file is 0600 on both machines (on the PC, setup step 2 does that).
+Anyone who can read it can send input to your PC, so treat it like a password.
 
 ## Protocol
 

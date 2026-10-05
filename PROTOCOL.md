@@ -23,8 +23,9 @@ over the air in the clear.
   session makes reuse across sessions vanishingly unlikely.
 - **On the wire**: `nonce(12) || ciphertext(N) || tag(16)`
 
-Both platforms use an OS-provided implementation — CryptoKit on macOS, BCrypt
-(CNG) on Windows — so there is no third-party crypto to vendor or keep updated.
+Neither side uses third-party crypto: CryptoKit on macOS, Go's standard library
+(`crypto/aes`, `crypto/cipher`) on Linux. There is nothing to vendor. Go's is
+compiled into the binary, so picking up a Go security fix means rebuilding.
 
 ## Replay protection
 
@@ -47,7 +48,7 @@ u32  seq
 |---|---|---|---|
 | 1 | MOVE | `i16 dx, i16 dy` | Relative. Lost packets self-correct. |
 | 2 | BUTTON | `u8 button, u8 down` | 1=left 2=right 3=middle |
-| 3 | WHEEL | `i16 dx, i16 dy` | Notches ×120, as Windows expects |
+| 3 | WHEEL | `i16 dx, i16 dy` | Notches ×120 — the unit Windows uses, and also the unit of Linux's high-resolution wheel events |
 | 4 | KEY | `u16 vk, u8 down, u32 mods` | `vk` is a **Windows** virtual-key code |
 | 5 | ENTER | — | Sender took control |
 | 6 | LEAVE | — | Sender released control; receiver must release everything held |
@@ -66,11 +67,13 @@ sender emits it when a modifier changes on its own. The receiver must still
 reconcile modifiers from it; dropping it as an invalid keycode loses
 Shift-click and Cmd-scroll.
 
-### Key mapping happens on the Mac
+### Keys travel as Windows virtual-key codes
 
 The Mac translates its own keycodes into Windows virtual-key codes before
-sending, including the Cmd→Ctrl swap. The receiver stays dumb: it takes a `vk`
-and injects it. All the platform awkwardness lives on one side.
+sending, including the Cmd→Ctrl swap. That was the receiver's native format
+when the receiver ran on Windows. The Linux receiver maps each `vk` to a Linux
+key code with a fixed table, then injects that. The format was left alone so
+the Mac side did not have to change; the cost is one table on the receiver.
 
 ### LEAVE is a safety valve
 
@@ -86,6 +89,10 @@ u32  frame length (of everything that follows)
 ```
 
 Plaintext: `u8 format, bytes data` — format `1` is UTF-8 text. Capped at 1 MB.
+
+The SteamOS receiver does not implement this yet. Nothing listens on TCP 24810,
+so the Mac's connection is refused and it drops that clipboard update without
+affecting input.
 
 ## Reliability, deliberately unequal
 

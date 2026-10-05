@@ -1,12 +1,12 @@
-// kmlink - Mac side. Captures keyboard and mouse, sends them to a Windows PC.
+// kmlink - Mac side. Captures keyboard and mouse, sends them to the PC.
 //
 // See ../PROTOCOL.md. The short version: input goes over encrypted UDP as
-// relative deltas, the clipboard goes over encrypted TCP, and the Mac does all
-// the keycode translation so the receiver stays dumb.
+// relative deltas, the clipboard goes over encrypted TCP, and keys go as
+// Windows virtual-key codes, which the receiver maps with one lookup table.
 //
 // Build:  ./build-mac.sh
 // Usage:  kmlink --genkey
-//         kmlink <windows-ip>
+//         kmlink <pc-ip>
 
 import Foundation
 import CoreGraphics
@@ -36,8 +36,8 @@ struct Mods: OptionSet {
 
 // MARK: - Keycode translation
 //
-// macOS virtual keycode -> Windows virtual-key code. Doing this here keeps all
-// the platform awkwardness on one side; the receiver just injects what it gets.
+// macOS virtual keycode -> Windows virtual-key code. That is what the wire
+// format carries; the receiver maps it to its own key codes with a table.
 
 let VK: [Int64: UInt16] = [
     // letters
@@ -64,13 +64,13 @@ let VK: [Int64: UInt16] = [
     0x62: 0x76, 0x64: 0x77, 0x65: 0x78, 0x6D: 0x79, 0x67: 0x7A, 0x6F: 0x7B,
 ]
 
-/// Command becomes Control on Windows, so Cmd+C copies. Control becomes the
-/// Windows key. Without this every shortcut lands on the wrong modifier.
+/// Command becomes Control on the PC, so Cmd+C copies. Control becomes the
+/// Super key. Without this every shortcut lands on the wrong modifier.
 func translateMods(_ flags: CGEventFlags) -> Mods {
     var m = Mods()
     if flags.contains(.maskShift)      { m.insert(.shift) }
     if flags.contains(.maskCommand)    { m.insert(.ctrl)  }   // Cmd -> Ctrl
-    if flags.contains(.maskControl)    { m.insert(.gui)   }   // Ctrl -> Win
+    if flags.contains(.maskControl)    { m.insert(.gui)   }   // Ctrl -> Super
     if flags.contains(.maskAlternate)  { m.insert(.alt)   }
     return m
 }
@@ -291,7 +291,7 @@ final class Controller {
 
         statusBar?.set(active: true)
         sender.send(payload(.enter), copies: 3)
-        FileHandle.standardError.write("-> windows\n".data(using: .utf8)!)
+        FileHandle.standardError.write("-> pc\n".data(using: .utf8)!)
     }
 
     func leave() {
@@ -422,7 +422,7 @@ if args.contains("--genkey") {
     print(hex)
     print("")
     print("Saved to \(KEY_FILE.path)")
-    print("Put the same line in %LOCALAPPDATA%\\kmlink\\key.txt on the PC.")
+    print("Put the same line in ~/.config/kmlink/key.txt on the PC.")
     exit(0)
 }
 
@@ -444,8 +444,8 @@ if args.count >= 2, !args[1].hasPrefix("--") {
 } else if let h = savedHost, !h.isEmpty {
     host = h
 } else {
-    print("usage: kmlink <windows-ip>")
-    print("       kmlink --set-host <windows-ip>   remember it, then run with no arguments")
+    print("usage: kmlink <pc-ip>")
+    print("       kmlink --set-host <pc-ip>   remember it, then run with no arguments")
     print("       kmlink --genkey")
     exit(1)
 }

@@ -10,66 +10,45 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
+      # No setup-go: the runner image already ships a Go newer than the 1.21 go.mod asks for.
       - name: Build
-        shell: cmd
-        run: |
-          rem Do not hardcode the Visual Studio path: the edition and version
-          rem differ between runner images. vswhere ships with the installer
-          rem and is the supported way to find it.
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-          if not defined VSPATH ( echo Visual Studio with the C++ toolset not found & exit /b 1 )
-          echo Using %VSPATH%
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          rem /SUBSYSTEM:WINDOWS with mainCRTStartup: no console window ever
-          rem appears, but main() is still the entry point. Diagnostics go to
-          rem %LOCALAPPDATA%\kmlink\kmlink.log, and to the console when one exists.
-          cl /nologo /W4 /O2 /guard:cf win\kmlink-win.c /Fe:kmlink-win.exe ^
-             ws2_32.lib bcrypt.lib user32.lib advapi32.lib ^
-             /link /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
-             /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
+        run: ./build-linux.sh
+
+      - name: Vet and test
+        run: cd linux && go vet ./... && go test ./...
 
       - name: Crypto interop self-test
-        shell: pwsh
         run: |
-          # The one thing that cannot be checked on the Mac: that BCrypt reads
-          # exactly what CryptoKit wrote. If this fails, every packet would fail
-          # authentication at runtime and nothing would work.
-          #
-          # Start-Process -Wait because this is a WINDOWS-subsystem binary now:
-          # the shell does not wait for one, so $LASTEXITCODE would be whatever
-          # ran before it.
-          $p = Start-Process -FilePath ./kmlink-win.exe -ArgumentList '--selftest' `
-                             -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) { throw "AES-GCM interop self-test failed ($($p.ExitCode))" }
-          Write-Host "AES-256-GCM interop ok (exit 0)"
-
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory out | Out-Null
-          Copy-Item kmlink-win.exe out
-          Copy-Item README.md, PROTOCOL.md out
-          Get-ChildItem out | ForEach-Object { Write-Host "  $($_.Name)" }
+          # The one thing both halves must agree on byte for byte: that Go's GCM
+          # reads exactly what CryptoKit wrote. If this fails, every packet would
+          # fail authentication at runtime and nothing would work. Run on the
+          # binary that ships, not just in the tests.
+          ./out/kmlink-linux --selftest
 
       - uses: actions/upload-artifact@v4
         with:
-          name: kmlink-windows
-          path: out
+          name: kmlink-linux
+          path: out/kmlink-linux
           if-no-files-found: error
 
       - name: Publish to the rolling release
         if: github.event_name == 'push'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Compress-Archive -Path out/* -DestinationPath kmlink-windows.zip -Force
-          gh release upload windows kmlink-windows.zip --clobber --repo $env:GITHUB_REPOSITORY
+          # Created on first use, so the very first push does not fail for want
+          # of a release to upload into. After that only the asset is replaced,
+          # which is what keeps the download URL in README.md stable.
+          gh release view linux --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create linux --title "kmlink for SteamOS" \
+              --notes "Built by CI from main on every push. Only the kmlink-linux asset is replaced; the tag does not move." \
+              --repo "$GITHUB_REPOSITORY"
+          gh release upload linux out/kmlink-linux --clobber --repo "$GITHUB_REPOSITORY"
 
   mac:
     runs-on: macos-latest
